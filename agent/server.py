@@ -42,6 +42,11 @@ class Server(Base):
     def press_url(self):
         return self.config.get("press_url", "https://frappecloud.com")
 
+    def _is_proxy_server(self) -> bool:
+        if "is_proxy_server" in self.config:
+            return bool(self.config["is_proxy_server"])
+        return bool(self.config.get("domain"))
+
     def docker_login(self, registry):
         url = registry["url"]
         username = registry["username"]
@@ -557,7 +562,7 @@ class Server(Base):
                 self.execute(f"sudo supervisorctl stop agent:worker-{worker_id}", non_zero_throw=False)
 
         # Stop NGINX Reload Manager if it's a proxy server
-        is_proxy_server = self.config.get("domain") and self.config.get("name").startswith("n")
+        is_proxy_server = self._is_proxy_server()
         if is_proxy_server:
             self.execute("sudo supervisorctl stop agent:nginx_reload_manager", non_zero_throw=False)
 
@@ -793,7 +798,7 @@ class Server(Base):
             "user": self.config["user"],
             "sentry_dsn": self.config.get("sentry_dsn"),
         }
-        if self.config.get("name").startswith("n"):
+        if self._is_proxy_server():
             data["is_proxy_server"] = True
 
         self._render_template(
