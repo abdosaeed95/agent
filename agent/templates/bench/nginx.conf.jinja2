@@ -96,17 +96,20 @@ server {
 		try_files /$site_name_{{ bench_name_slug }}/public/$uri @webserver;
 	}
 
-	location @webserver {
-		proxy_set_header X-Forwarded-For $remote_addr;
-		proxy_set_header X-Forwarded-Proto https;
-		proxy_set_header X-Frappe-Site-Name $site_name_{{ bench_name_slug }};
-		proxy_set_header Host $host;
-		proxy_set_header X-Use-X-Accel-Redirect True;
-		proxy_read_timeout {{ http_timeout }};
-		proxy_redirect off;
+		location @webserver {
+			proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+			proxy_set_header X-Forwarded-Proto https;
+			proxy_set_header X-Forwarded-Port 443;
+			proxy_set_header X-Forwarded-Ssl on;
+			proxy_set_header Front-End-Https on;
+			proxy_set_header X-Frappe-Site-Name $site_name_{{ bench_name_slug }};
+			proxy_set_header Host $host;
+			proxy_set_header X-Use-X-Accel-Redirect True;
+			proxy_read_timeout {{ http_timeout }};
+			proxy_redirect off;
 
-		proxy_pass  http://{{ bench_name }}-web-server;
-	}
+			proxy_pass  http://{{ bench_name }}-web-server;
+		}
 
 	proxy_intercept_errors on;
 	error_page 429 /exceeded.html;
