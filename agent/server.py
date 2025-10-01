@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 import tempfile
 import time
 from contextlib import suppress
@@ -13,13 +14,20 @@ from jinja2 import Environment, PackageLoader
 from passlib.hash import pbkdf2_sha256 as pbkdf2
 from peewee import MySQLDatabase
 
+from agent.application_storage_analyzer import (
+    analyze_benches_structure,
+    format_size,
+    parse_docker_df_output,
+    parse_total_disk_usage_output,
+    to_bytes,
+)
 from agent.base import AgentException, Base
 from agent.bench import Bench
-from agent.exceptions import BenchNotExistsException
+from agent.exceptions import BenchNotExistsException, RegistryDownException
 from agent.job import Job, Step, job, step
 from agent.patch_handler import run_patches
 from agent.site import Site
-from agent.utils import get_supervisor_processes_status
+from agent.utils import get_supervisor_processes_status, is_registry_healthy
 
 
 class Server(Base):
@@ -53,8 +61,22 @@ class Server(Base):
         password = registry["password"]
         return self.execute(f"docker login -u {username} -p {password} {url}")
 
+    def establish_connection_with_registry(self, max_retries: int, registry: dict[str, str]):
+        """Given the attempt count try and establish connection with the registry else Raise"""
+        for attempt in range(max_retries):
+            try:
+                if not is_registry_healthy(registry["url"], registry["username"], registry["password"]):
+                    raise RegistryDownException("Registry is not available")
+                break
+            except RegistryDownException as e:
+                if attempt == max_retries - 1:
+                    raise Exception("Failed to pull image") from e
+
+                time.sleep(60)
+
     @step("Initialize Bench")
-    def bench_init(self, name, config):
+    def bench_init(self, name, config, registry: dict[str, str]):
+        self.establish_connection_with_registry(max_retries=3, registry=registry)
         bench_directory = os.path.join(self.benches_directory, name)
         os.mkdir(bench_directory)
         directories = ["logs", "sites", "config"]
@@ -96,7 +118,7 @@ class Server(Base):
     @job("New Bench", priority="low")
     def new_bench(self, name, bench_config, common_site_config, registry, mounts=None):
         self.docker_login(registry)
-        self.bench_init(name, bench_config)
+        self.bench_init(name, bench_config, registry)
         bench = Bench(name, self, mounts=mounts)
         bench.update_config(common_site_config, bench_config)
         if bench.bench_config.get("single_container"):
@@ -104,16 +126,70 @@ class Server(Base):
         bench.deploy()
         bench.setup_nginx()
 
-    def container_exists(self, name: str):
+    def container_exists(self, name: str, max_retries: int = 3):
         """
-        Throw if container exists
+        Throw if container exists; after 5 retries with backoff of 5 seconds
         """
+        for attempt in range(max_retries):
+            try:
+                self.execute(f"""docker ps --filter "name=^{name}$" | grep {name}""")
+            except AgentException:
+                break  # container does not exist
+            else:
+                if attempt == max_retries - 1:
+                    raise Exception("Container exists")
+                time.sleep(5)
+
+    def get_image_size(self, image_tag: str):
         try:
-            self.execute(f"""docker ps --filter "name=^{name}$" | grep {name}""")
+            return (
+                to_bytes(
+                    self.execute(
+                        f'docker image ls --format "{{{{.Tag}}}} {{{{.Size}}}}" | grep -E "^{image_tag} "'
+                    )["output"].split()[-1]
+                )
+                / 1024**3
+            )
         except AgentException:
-            pass  # container does not exist
-        else:
-            raise Exception("Container exists")
+            pass
+
+    def unused_image_size(self) -> list[float]:
+        """Get the sizes of all the images that are not in use in bytes"""
+        images_present = self.execute("docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}'")[
+            "output"
+        ].split("\n")
+        images_present = [image.split() for image in images_present]
+        images_in_use = self.execute("docker container ls --format {{.Image}}")["output"].split("\n")
+
+        return [to_bytes(size) for image_name, size in images_present if image_name not in images_in_use]
+
+    def get_reclaimable_size(self) -> dict[str, dict[str, float] | float]:
+        """Checks archived and unused docker artefacts size"""
+        archived_folder_size = self.execute(
+            "du -sB1 /home/frappe/archived/ --exclude assets | awk '{print $1}'"
+        ).get("output")
+        unused_images_size = sum(self.unused_image_size())
+
+        formatted_archived_folder_size = f"{round(float(archived_folder_size) / 1024**3, 2)}GB"
+        formatted_unused_image_size = format_size(unused_images_size)
+
+        return {
+            "archived": formatted_archived_folder_size,
+            "images": formatted_unused_image_size,
+            "total": round((unused_images_size + float(archived_folder_size)) / 1024**3, 2),
+        }
+
+    def _check_site_on_bench(self, bench_name: str):
+        """Check if sites are present on the benches"""
+        sites_directory = f"/home/frappe/benches/{bench_name}/sites"
+        for possible_site in os.listdir(sites_directory):
+            if os.path.exists(os.path.join(sites_directory, possible_site, "site_config.json")):
+                raise Exception(f"Bench {bench_name} has sites")
+
+    def disable_production_on_bench(self, name: str):
+        """In case of corrupted bench / site config don't stall archive"""
+        self._check_site_on_bench(name)
+        self.execute(f"docker rm {name} --force")
 
     @job("Archive Bench", priority="low")
     def archive_bench(self, name):
@@ -123,7 +199,7 @@ class Server(Base):
         try:
             bench = Bench(name, self)
         except json.JSONDecodeError:
-            pass
+            self.disable_production_on_bench(name)
         except FileNotFoundError as e:
             if not e.filename.endswith("common_site_config.json"):
                 raise
@@ -131,13 +207,14 @@ class Server(Base):
             if bench.sites:
                 raise Exception(f"Bench has sites: {bench.sites}")
             bench.disable_production()
+
         self.container_exists(name)
         self.move_bench_to_archived_directory(name)
 
     @job("Cleanup Unused Files", priority="low")
-    def cleanup_unused_files(self):
-        self.remove_archived_benches()
-        self.remove_temporary_files()
+    def cleanup_unused_files(self, force: bool = False):
+        self.remove_archived_benches(force)
+        self.remove_temporary_files(force)
         self.remove_unused_docker_artefacts()
 
     def remove_benches_without_container(self, benches: list[str]):
@@ -149,13 +226,13 @@ class Server(Base):
                     self.move_to_archived_directory(Bench(bench, self))
 
     @step("Remove Archived Benches")
-    def remove_archived_benches(self):
+    def remove_archived_benches(self, force: bool = False):
         now = datetime.now().timestamp()
         removed = []
         if os.path.exists(self.archived_directory):
             for bench in os.listdir(self.archived_directory):
                 bench_path = os.path.join(self.archived_directory, bench)
-                if now - os.stat(bench_path).st_mtime > 86400:
+                if force or (now - os.stat(bench_path).st_mtime > 86400):
                     removed.append(
                         {
                             "bench": bench,
@@ -169,7 +246,7 @@ class Server(Base):
         return {"benches": removed[:100]}
 
     @step("Remove Temporary Files")
-    def remove_temporary_files(self):
+    def remove_temporary_files(self, force: bool = False):
         temp_directory = tempfile.gettempdir()
         now = datetime.now().timestamp()
         removed = []
@@ -179,7 +256,7 @@ class Server(Base):
                 if not list(filter(lambda x: x in file, patterns)):
                     continue
                 file_path = os.path.join(temp_directory, file)
-                if now - os.stat(file_path).st_mtime > 7200:
+                if force or (now - os.stat(file_path).st_mtime > 7200):
                     removed.append({"file": file, "size": self._get_tree_size(file_path)})
                     if os.path.isfile(file_path):
                         os.remove(file_path)
@@ -206,17 +283,23 @@ class Server(Base):
         if os.path.exists(target):
             shutil.rmtree(target)
         bench_directory = os.path.join(self.benches_directory, bench_name)
+        assets_directory = os.path.join(bench_directory, "sites", "assets")
+
+        # Dropping assets we don't restore that anyways
+        if os.path.exists(assets_directory):
+            shutil.rmtree(assets_directory)
+
         self.execute(f"mv {bench_directory} {self.archived_directory}")
 
     @job("Update Site Pull", priority="low")
     def update_site_pull_job(self, name, source, target, activate):
         source = Bench(source, self)
-        target = Bench(target, self)
         site = Site(name, source)
 
         site.enable_maintenance_mode()
         site.wait_till_ready()
 
+        target = Bench(target, self)
         self.move_site(site, target)
         source.setup_nginx()
         target.setup_nginx_target()
@@ -245,7 +328,6 @@ class Server(Base):
             before_migrate_scripts = {}
 
         source = Bench(source, self)
-        target = Bench(target, self)
         site = Site(name, source)
 
         site.enable_maintenance_mode()
@@ -255,6 +337,7 @@ class Server(Base):
             site.clear_backup_directory()
             site.tablewise_backup()
 
+        target = Bench(target, self)
         self.move_site(site, target)
 
         source.setup_nginx()
@@ -352,13 +435,13 @@ class Server(Base):
         # Dangerous method (no backup),
         # use update_site_migrate if you don't know what you're doing
         source = Bench(source, self)
-        target = Bench(target, self)
         site = Site(name, source)
 
         if deactivate:  # cases when python is broken in bench
             site.enable_maintenance_mode()
             site.wait_till_ready()
 
+        target = Bench(target, self)
         self.move_site(site, target)
 
         source.setup_nginx()
@@ -428,6 +511,15 @@ class Server(Base):
     @step("Update Supervisor")
     def update_supervisor(self):
         return self._update_supervisor()
+
+    @job("Update Database Host", priority="high")
+    def update_database_host_job(self, db_host: str):
+        self.update_database_host_step(db_host)
+
+    @step("Update Database Host")
+    def update_database_host_step(self, db_host: str):
+        for b in self.benches.values():
+            b._update_database_host(db_host)
 
     def setup_authentication(self, password):
         self.update_config({"access_token": pbkdf2.hash(password)})
@@ -592,6 +684,51 @@ class Server(Base):
 
         if not skip_patches:
             run_patches()
+
+    @staticmethod
+    def run_ncdu_command(path: str, excludes: list | None = None) -> str | None:
+        cmd = ["ncdu", path, "-x", "-o", "/dev/stdout"]
+        if excludes:
+            for item in excludes:
+                cmd.extend(["--exclude", item])
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            return result.stdout if result.returncode == 0 else None
+        except subprocess.TimeoutExpired:
+            return None
+
+    def get_storage_breakdown(self) -> dict:
+        app_storage_analysis = {}
+        failed_message = "Failed to analyze storage"
+
+        benches_output = self.run_ncdu_command(
+            "/home/frappe/benches/", excludes=["node_modules", "env", "assets"]
+        )
+        docker_output = self.execute("docker system df --format '{{.Size}}'").get("output")
+        total_output = self.execute(
+            f"df -B1 {'/opt/volumes/benches' if os.path.exists('/opt/volumes/benches') else '/'}"
+        ).get("output")
+
+        if total_output:
+            total_data = parse_total_disk_usage_output(total_output)
+            app_storage_analysis["total"] = total_data
+
+        if benches_output:
+            benches_data = analyze_benches_structure(benches_output)
+            if benches_data:
+                app_storage_analysis["benches"] = benches_data
+
+        if docker_output:
+            docker_data = parse_docker_df_output(docker_output)
+            app_storage_analysis["docker"] = docker_data
+
+        return app_storage_analysis or {"error": failed_message}
 
     def get_agent_version(self):
         directory = os.path.join(self.directory, "repo")
@@ -797,6 +934,7 @@ class Server(Base):
             "directory": self.directory,
             "user": self.config["user"],
             "sentry_dsn": self.config.get("sentry_dsn"),
+            "is_standalone": self.config.get("standalone", False),
         }
         if self._is_proxy_server():
             data["is_proxy_server"] = True
@@ -808,7 +946,15 @@ class Server(Base):
         )
 
     def _reload_nginx(self):
-        return self.execute("sudo systemctl reload nginx")
+        try:
+            return self.execute("sudo systemctl reload nginx")
+        except AgentException as e:
+            try:
+                self.execute("sudo nginx -t")
+            except AgentException as e2:
+                raise e2 from e
+            else:
+                raise e
 
     def _render_template(self, template, context, outfile, options=None):
         if options is None:

@@ -797,6 +797,9 @@ class Bench(Base):
             cmd += f" --cpus={vcpu}"
         return self.execute(cmd)
 
+    def _update_database_host(self, db_host: str):
+        self._update_config({"db_host": db_host})
+
     @property
     def job_record(self):
         return self.server.job_record
@@ -872,8 +875,14 @@ class Bench(Base):
             os.fsync(temp_file.fileno())
             temp_file.close()
 
-        shutil.copy2(temp_file.name, self.bench_config_file)
-        os.remove(temp_file.name)
+        os.rename(self.bench_config_file, self.bench_config_file + ".bak")
+
+        try:
+            shutil.copy2(temp_file.name, self.bench_config_file)
+            os.remove(temp_file.name)
+        except Exception as e:
+            os.rename(self.bench_config_file + ".bak", self.bench_config_file)
+            raise e
 
     @job("Patch App")
     def patch_app(
