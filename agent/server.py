@@ -48,7 +48,7 @@ class Server(Base):
 
     @property
     def press_url(self):
-        return self.config.get("press_url", "https://frappecloud.com")
+        return self.config.get("press_url", "https://fodistacloud.com")
 
     def _is_proxy_server(self) -> bool:
         if "is_proxy_server" in self.config:
