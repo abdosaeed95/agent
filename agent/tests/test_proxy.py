@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 import unittest
 from unittest.mock import patch
 
@@ -271,3 +272,53 @@ class TestProxy(unittest.TestCase):
         map_file = os.path.join(host_dir, "map.json")
         with open(map_file) as m:
             self.assertDictEqual(json.load(m), {self.domain_1: "yyy.frappe.cloud"})
+
+    def test_try_break_lock_removes_dead_pid(self):
+        """Ensure stale locks owned by dead processes are cleaned up."""
+        proxy = self._get_fake_proxy()
+        lock_path = proxy._proxy_lock_path()
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "w"):
+            pass
+        metadata_path = proxy._proxy_lock_metadata_path()
+        with open(metadata_path, "w") as meta:
+            json.dump({"pid": 999999, "created_at": time.time() - 100}, meta)
+
+        with patch("agent.proxy.psutil.pid_exists", return_value=False):
+            self.assertTrue(proxy._try_break_stale_proxy_lock())
+
+        self.assertFalse(os.path.exists(lock_path))
+        self.assertFalse(os.path.exists(metadata_path))
+
+    def test_try_break_lock_keeps_active_pid(self):
+        """Ensure active locks are not forcefully removed."""
+        proxy = self._get_fake_proxy()
+        lock_path = proxy._proxy_lock_path()
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "w"):
+            pass
+        metadata_path = proxy._proxy_lock_metadata_path()
+        with open(metadata_path, "w") as meta:
+            json.dump({"pid": os.getpid(), "created_at": time.time()}, meta)
+
+        with patch("agent.proxy.psutil.pid_exists", return_value=True):
+            self.assertFalse(proxy._try_break_stale_proxy_lock())
+
+        self.assertTrue(os.path.exists(lock_path))
+        self.assertTrue(os.path.exists(metadata_path))
+
+    def test_try_break_lock_without_metadata_uses_mtime(self):
+        """Ensure stale locks without metadata are also removed."""
+        proxy = self._get_fake_proxy()
+        lock_path = proxy._proxy_lock_path()
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "w"):
+            pass
+
+        past_time = time.time() - 100
+        os.utime(lock_path, (past_time, past_time))
+
+        with patch.object(Proxy, "PROXY_LOCK_FORCE_RELEASE_AFTER", 1):
+            self.assertTrue(proxy._try_break_stale_proxy_lock())
+
+        self.assertFalse(os.path.exists(lock_path))

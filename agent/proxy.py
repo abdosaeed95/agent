@@ -4,12 +4,15 @@ import json
 import os
 import shutil
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from functools import wraps
 from hashlib import sha512 as sha
 from pathlib import Path
+import socket
+import time
 
 import filelock
+import psutil
 
 from agent.job import job, step
 from agent.server import Server
@@ -28,6 +31,9 @@ def with_proxy_config_lock():
 
 
 class Proxy(Server):
+    PROXY_LOCK_ACQUIRE_TIMEOUT = int(os.environ.get("PROXY_LOCK_ACQUIRE_TIMEOUT", 30))
+    PROXY_LOCK_FORCE_RELEASE_AFTER = int(os.environ.get("PROXY_LOCK_FORCE_RELEASE_AFTER", 300))
+
     def __init__(self, directory=None):
         super().__init__(directory)
         self.directory = directory or os.getcwd()
@@ -401,14 +407,115 @@ class Proxy(Server):
                 wildcards.append(host.strip("*."))
         return wildcards
 
+    def _proxy_lock_path(self) -> str:
+        return os.path.join(self.nginx_directory, "proxy_config.lock")
+
+    def _proxy_lock_metadata_path(self) -> str:
+        return f"{self._proxy_lock_path()}.meta"
+
+    def _ensure_proxy_lock(self) -> filelock.FileLock:
+        if self._proxy_config_modification_lock is None:
+            self._proxy_config_modification_lock = filelock.FileLock(
+                self._proxy_lock_path(),
+                timeout=self.PROXY_LOCK_ACQUIRE_TIMEOUT,
+            )
+        return self._proxy_config_modification_lock
+
+    def _write_proxy_lock_metadata(self) -> bool:
+        metadata = {
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "created_at": time.time(),
+        }
+        job_model = getattr(getattr(self, "job_record", None), "model", None)
+        if job_model:
+            metadata.update({"job_id": getattr(job_model, "id", None)})
+        step_model = getattr(getattr(self, "step_record", None), "model", None)
+        if step_model:
+            metadata.update({"step_id": getattr(step_model, "id", None)})
+
+        try:
+            with open(self._proxy_lock_metadata_path(), "w") as meta_file:
+                json.dump(metadata, meta_file, default=str)
+            return True
+        except OSError:
+            return False
+
+    def _clear_proxy_lock_metadata(self):
+        metadata_path = self._proxy_lock_metadata_path()
+        with suppress(FileNotFoundError):
+            os.remove(metadata_path)
+
+    def _read_proxy_lock_metadata(self) -> dict | None:
+        metadata_path = self._proxy_lock_metadata_path()
+        try:
+            with open(metadata_path) as meta_file:
+                return json.load(meta_file)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+    def _try_break_stale_proxy_lock(self) -> bool:
+        lock_path = self._proxy_lock_path()
+        metadata = self._read_proxy_lock_metadata()
+        now = time.time()
+
+        if metadata:
+            pid = metadata.get("pid")
+            pid_alive = False
+            if pid is not None:
+                try:
+                    pid_alive = psutil.pid_exists(int(pid))
+                except ValueError:
+                    pid_alive = False
+                except psutil.Error:
+                    pid_alive = True
+
+            created_at = metadata.get("created_at")
+            try:
+                created_at = float(created_at) if created_at is not None else None
+            except (TypeError, ValueError):
+                created_at = None
+
+            if not pid_alive or (
+                created_at is not None
+                and (now - created_at) > self.PROXY_LOCK_FORCE_RELEASE_AFTER
+            ):
+                self._force_remove_proxy_lock_files(lock_path)
+                return True
+            return False
+
+        try:
+            mtime = os.path.getmtime(lock_path)
+        except FileNotFoundError:
+            return False
+
+        if (now - mtime) > self.PROXY_LOCK_FORCE_RELEASE_AFTER:
+            self._force_remove_proxy_lock_files(lock_path)
+            return True
+
+        return False
+
+    def _force_remove_proxy_lock_files(self, lock_path: str):
+        print(f"Breaking stale proxy_config lock at {lock_path}")
+        Path(lock_path).unlink(missing_ok=True)
+        Path(self._proxy_lock_metadata_path()).unlink(missing_ok=True)
+
     @property
     @contextmanager
     def proxy_config_modification_lock(self):
-        if self._proxy_config_modification_lock is None:
-            lock_path = os.path.join(self.nginx_directory, "proxy_config.lock")
-            self._proxy_config_modification_lock = filelock.FileLock(
-                lock_path,
-            )
+        lock = self._ensure_proxy_lock()
+        while True:
+            try:
+                acquire_ctx = lock.acquire(timeout=self.PROXY_LOCK_ACQUIRE_TIMEOUT)
+                break
+            except filelock.Timeout as exc:
+                if not self._try_break_stale_proxy_lock():
+                    raise exc
 
-        with self._proxy_config_modification_lock:
-            yield
+        with acquire_ctx:
+            metadata_written = self._write_proxy_lock_metadata()
+            try:
+                yield
+            finally:
+                if metadata_written:
+                    self._clear_proxy_lock_metadata()
