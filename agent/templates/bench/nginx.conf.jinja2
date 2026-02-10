@@ -170,6 +170,13 @@ server {
 	add_header X-Content-Type-Options nosniff;
 	add_header X-XSS-Protection "1; mode=block";
 
+	# Allow HTTP-01 validation for custom domains on non-standalone benches.
+	# Always redirect challenges to the proxy's ssl.<domain> endpoint
+	# (e.g. ssl.fodista.com) to keep behaviour consistent with proxy.conf.
+	location ^~ /.well-known/acme-challenge/ {
+		return 301 http://ssl.{{ domain }}$request_uri;
+	}
+
 	location /assets {
 		try_files $uri =404;
 		add_header Cache-Control "max-age=31536000, immutable";
@@ -261,7 +268,7 @@ server {
 
 {% endif %}
 {%- endif %}
-{% if sites or domains %}
+{% if standalone and (sites or domains) %}
 server {
 	listen 80;
 	server_name
@@ -295,4 +302,3 @@ server {
     }
 }
 {% endif %}
-
