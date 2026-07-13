@@ -80,12 +80,15 @@ class TestImageBuilder(unittest.TestCase):
     @patch("agent.builder.tempfile.mkdtemp", return_value="/tmp/docker-config")
     @patch("agent.builder.subprocess.run")
     def test_registry_password_uses_stdin(self, run, _mkdtemp):
-        self.get_builder()._get_build_environment()
+        with patch.dict("agent.builder.os.environ", {"DOCKER_CONFIG": "/persistent/docker"}, clear=True):
+            environment = self.get_builder()._get_build_environment()
 
         command = run.call_args.args[0]
         self.assertIn("--password-stdin", command)
         self.assertNotIn("password", command)
         self.assertEqual(run.call_args.kwargs["input"], "password")
+        self.assertEqual(environment["DOCKER_CONFIG"], "/tmp/docker-config")
+        self.assertEqual(environment["BUILDX_CONFIG"], "/persistent/docker/buildx")
 
 
 if __name__ == "__main__":

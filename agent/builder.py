@@ -212,6 +212,10 @@ class ImageBuilder(Base):
 
     def _get_build_environment(self) -> dict:
         environment = os.environ.copy()
+        environment["BUILDX_CONFIG"] = environment.get(
+            "BUILDX_CONFIG",
+            os.path.join(environment.get("DOCKER_CONFIG", os.path.expanduser("~/.docker")), "buildx"),
+        )
         environment.update(
             {
                 "DOCKER_BUILDKIT": "1",
