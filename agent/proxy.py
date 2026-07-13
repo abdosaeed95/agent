@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import socket
-import time
 from collections import defaultdict
 from contextlib import contextmanager, suppress
 from functools import wraps
 from hashlib import sha512 as sha
 from pathlib import Path
+import socket
+import time
 
 import filelock
 import psutil
@@ -477,7 +477,8 @@ class Proxy(Server):
                 created_at = None
 
             if not pid_alive or (
-                created_at is not None and (now - created_at) > self.PROXY_LOCK_FORCE_RELEASE_AFTER
+                created_at is not None
+                and (now - created_at) > self.PROXY_LOCK_FORCE_RELEASE_AFTER
             ):
                 self._force_remove_proxy_lock_files(lock_path)
                 return True
