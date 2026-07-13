@@ -138,3 +138,7 @@ dmypy.json
 .vim/
 
 .DS_Store
+.superpowers/
+.agents/skills/superpowers/
+.codex/superpowers/
+superpowers/
