@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
+import time
 from collections import defaultdict
 from contextlib import contextmanager, suppress
 from functools import wraps
 from hashlib import sha512 as sha
 from pathlib import Path
-import socket
-import time
 
 import filelock
 import psutil
@@ -454,21 +454,24 @@ class Proxy(Server):
         except (FileNotFoundError, json.JSONDecodeError):
             return None
 
+    @staticmethod
+    def _is_proxy_lock_process_alive(pid) -> bool:
+        if pid is None:
+            return False
+        try:
+            return psutil.pid_exists(int(pid))
+        except ValueError:
+            return False
+        except psutil.Error:
+            return True
+
     def _try_break_stale_proxy_lock(self) -> bool:
         lock_path = self._proxy_lock_path()
         metadata = self._read_proxy_lock_metadata()
         now = time.time()
 
         if metadata:
-            pid = metadata.get("pid")
-            pid_alive = False
-            if pid is not None:
-                try:
-                    pid_alive = psutil.pid_exists(int(pid))
-                except ValueError:
-                    pid_alive = False
-                except psutil.Error:
-                    pid_alive = True
+            pid_alive = self._is_proxy_lock_process_alive(metadata.get("pid"))
 
             created_at = metadata.get("created_at")
             try:
@@ -477,8 +480,7 @@ class Proxy(Server):
                 created_at = None
 
             if not pid_alive or (
-                created_at is not None
-                and (now - created_at) > self.PROXY_LOCK_FORCE_RELEASE_AFTER
+                created_at is not None and (now - created_at) > self.PROXY_LOCK_FORCE_RELEASE_AFTER
             ):
                 self._force_remove_proxy_lock_files(lock_path)
                 return True
