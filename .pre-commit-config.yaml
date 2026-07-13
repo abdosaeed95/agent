@@ -1,3 +1,6 @@
+ci:
+  autofix_prs: false
+
 exclude: 'node_modules|.git'
 default_stages: [pre-commit]
 fail_fast: false
