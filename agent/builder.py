@@ -282,10 +282,13 @@ class ImageBuilder(Base):
         return environment
 
     def _login_to_registry(self, environment):
+        registry_url = self.registry["url"]
+        if registry_url == "registry-1.docker.io":
+            registry_url = "docker.io"
         command = [
             "docker",
             "login",
-            self.registry["url"],
+            registry_url,
             "--username",
             self.registry["username"],
             "--password-stdin",

@@ -210,6 +210,7 @@ class TestImageBuilder(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("--password-stdin", command)
         self.assertNotIn("password", command)
+        self.assertEqual(command[2], "registry.example.com")
         self.assertEqual(run.call_args.kwargs["input"], "password")
         self.assertEqual(environment["DOCKER_CONFIG"], "/tmp/docker-config")
         self.assertEqual(environment["BUILDX_CONFIG"], "/persistent/docker/buildx")
@@ -228,6 +229,16 @@ class TestImageBuilder(unittest.TestCase):
 
         self.assertEqual(run.call_count, 2)
         sleep.assert_called_once_with(builder.REGISTRY_RETRY_DELAY)
+
+    @patch("agent.builder.subprocess.run")
+    def test_docker_hub_login_uses_canonical_server(self, run):
+        builder = self.get_builder()
+        builder.registry["url"] = "registry-1.docker.io"
+        builder.docker_config_directory = "/tmp/docker-config"
+
+        builder._login_to_registry({})
+
+        self.assertEqual(run.call_args.args[0][2], "docker.io")
 
 
 if __name__ == "__main__":
