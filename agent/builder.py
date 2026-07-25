@@ -11,6 +11,7 @@ from datetime import datetime
 from subprocess import Popen
 from typing import TYPE_CHECKING
 
+import docker
 from filelock import FileLock
 
 from agent.base import Base
@@ -57,6 +58,7 @@ class ImageBuilder(Base):
         force_compression: bool = False,
         oci_mediatypes: bool = False,
         build_runtime_image: bool = False,
+        apply_new_build: bool = False,
     ) -> None:
         super().__init__()
 
@@ -78,7 +80,8 @@ class ImageBuilder(Base):
         self.image_compression_level = image_compression_level
         self.force_compression = force_compression
         self.oci_mediatypes = oci_mediatypes
-        self.build_runtime_image = build_runtime_image
+        self.apply_new_build = apply_new_build
+        self.build_runtime_image = apply_new_build and build_runtime_image
         self.image_digest = ""
         self.runtime_image_digest = ""
         self.docker_config_directory = ""
@@ -143,8 +146,19 @@ class ImageBuilder(Base):
         # Note: build command and environment are different from when
         # build runs on the press server.
         environment = self._get_build_environment()
-        self._ensure_buildx_builder(environment)
         command = self._get_build_command(runtime)
+
+        if not self.apply_new_build:
+            result = self._run(
+                command=command,
+                environment=environment,
+                input_filepath=self.filepath,
+            )
+            self.output["build"] = []
+            self._publish_docker_build_output(result)
+            return {"output": self.output["build"]}
+
+        self._ensure_buildx_builder(environment)
         variant_output_start = len(self.output["build"])
 
         for attempt in range(self.MAX_BUILD_ATTEMPTS):
@@ -175,6 +189,13 @@ class ImageBuilder(Base):
         return any(marker in output for marker in self.REGISTRY_ERROR_MARKERS)
 
     def _get_build_command(self, runtime: bool = False) -> str:
+        if not self.apply_new_build:
+            command = f"docker buildx build --platform {self.platform}"
+            command = f"{command} -t {self._get_image_name()}"
+            if self.no_cache:
+                command = f"{command} --no-cache"
+            return f"{command} - "
+
         command = f"docker buildx build --builder {self.BUILDER_NAME} --platform {self.platform}"
         image_name = self._get_image_name(runtime)
         metadata_file = self.runtime_metadata_file if runtime else self.metadata_file
@@ -260,16 +281,20 @@ class ImageBuilder(Base):
 
     def _get_build_environment(self) -> dict:
         environment = os.environ.copy()
-        environment["BUILDX_CONFIG"] = environment.get(
-            "BUILDX_CONFIG",
-            os.path.join(environment.get("DOCKER_CONFIG", os.path.expanduser("~/.docker")), "buildx"),
-        )
         environment.update(
             {
                 "DOCKER_BUILDKIT": "1",
                 "BUILDKIT_PROGRESS": "plain",
                 "PROGRESS_NO_TRUNC": "1",
             }
+        )
+
+        if not self.apply_new_build:
+            return environment
+
+        environment["BUILDX_CONFIG"] = environment.get(
+            "BUILDX_CONFIG",
+            os.path.join(environment.get("DOCKER_CONFIG", os.path.expanduser("~/.docker")), "buildx"),
         )
 
         if not self.no_push:
@@ -339,6 +364,9 @@ class ImageBuilder(Base):
 
     @step("Push Docker Image")
     def _push_docker_image(self):
+        if not self.apply_new_build:
+            return self._push_legacy_docker_image()
+
         self._verify_pushed_image()
         if self.build_runtime_image:
             self._verify_pushed_image(runtime=True)
@@ -365,6 +393,52 @@ class ImageBuilder(Base):
             )
         self._publish_throttled_output(True)
         return self.output["push"]
+
+    def _push_legacy_docker_image(self):
+        client = docker.from_env(environment=os.environ.copy(), timeout=5 * 60)
+
+        for attempt in range(self.MAX_BUILD_ATTEMPTS):
+            self.output["push"].append({"id": "Retry", "output": "", "status": f"Success {attempt}"})
+            try:
+                if not is_registry_healthy(
+                    self.registry["url"], self.registry["username"], self.registry["password"]
+                ):
+                    raise RegistryDownException("Registry is currently down")
+
+                self._push_legacy_image(client)
+
+                if not is_registry_healthy(
+                    self.registry["url"], self.registry["username"], self.registry["password"]
+                ):
+                    raise RegistryDownException("Registry became unhealthy after push")
+
+                return self.output["push"]
+            except RegistryDownException as error:
+                if attempt == self.MAX_BUILD_ATTEMPTS - 1:
+                    self._publish_throttled_output(True)
+                    raise RuntimeError("Failed to push image after multiple attempts") from error
+                time.sleep(self.REGISTRY_RETRY_DELAY)
+            except Exception:
+                self._publish_throttled_output(True)
+                raise
+
+        return self.output["push"]
+
+    def _push_legacy_image(self, client):
+        auth_config = {
+            "username": self.registry["username"],
+            "password": self.registry["password"],
+            "serveraddress": self.registry["url"],
+        }
+        for line in client.images.push(
+            self.image_repository,
+            self.image_tag,
+            stream=True,
+            decode=True,
+            auth_config=auth_config,
+        ):
+            self.output["push"].append(line)
+            self._publish_throttled_output(False)
 
     def _verify_pushed_image(self, runtime: bool = False):
         image_digest = self.runtime_image_digest if runtime else self.image_digest

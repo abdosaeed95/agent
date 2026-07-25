@@ -215,6 +215,7 @@ def build_image():
         force_compression=data.get("force_compression", False),
         oci_mediatypes=data.get("oci_mediatypes", False),
         build_runtime_image=data.get("build_runtime_image", False),
+        apply_new_build=data.get("apply_new_build", False),
     )
     job = image_builder.run_remote_builder()
     return {"job": job}
