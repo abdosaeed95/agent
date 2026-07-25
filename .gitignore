@@ -139,6 +139,7 @@ dmypy.json
 
 .DS_Store
 .superpowers/
+docs/superpowers/
 .agents/skills/superpowers/
 .codex/superpowers/
 superpowers/

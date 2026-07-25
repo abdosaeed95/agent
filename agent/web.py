@@ -210,6 +210,11 @@ def build_image():
         no_push=data.get("no_push"),
         registry=data.get("registry"),
         platform=data.get("platform", "linux/amd64"),
+        image_compression=data.get("image_compression", "gzip"),
+        image_compression_level=data.get("image_compression_level", 0),
+        force_compression=data.get("force_compression", False),
+        oci_mediatypes=data.get("oci_mediatypes", False),
+        build_runtime_image=data.get("build_runtime_image", False),
     )
     job = image_builder.run_remote_builder()
     return {"job": job}

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
+import shutil
 import subprocess
+import tempfile
 import time
 from datetime import datetime
 from subprocess import Popen
 from typing import TYPE_CHECKING
 
-import docker
+from filelock import FileLock
 
 from agent.base import Base
 from agent.exceptions import RegistryDownException
@@ -23,6 +26,21 @@ if TYPE_CHECKING:
 
 
 class ImageBuilder(Base):
+    BUILDER_NAME = "press-image-builder"
+    BUILDER_LOCK = "/tmp/press-image-builder.lock"
+    MAX_BUILD_ATTEMPTS = 3
+    REGISTRY_RETRY_DELAY = 60
+    REGISTRY_ERROR_MARKERS = (
+        "connection refused",
+        "connection reset by peer",
+        "context deadline exceeded",
+        "failed to do request",
+        "failed to push",
+        "i/o timeout",
+        "tls handshake timeout",
+        "unexpected status from",
+    )
+
     output: Output
 
     def __init__(
@@ -34,6 +52,11 @@ class ImageBuilder(Base):
         no_push: bool,
         registry: dict,
         platform: str,
+        image_compression: str = "gzip",
+        image_compression_level: int = 0,
+        force_compression: bool = False,
+        oci_mediatypes: bool = False,
+        build_runtime_image: bool = False,
     ) -> None:
         super().__init__()
 
@@ -51,6 +74,16 @@ class ImageBuilder(Base):
         )
         self.no_cache = no_cache
         self.no_push = no_push
+        self.image_compression = image_compression
+        self.image_compression_level = image_compression_level
+        self.force_compression = force_compression
+        self.oci_mediatypes = oci_mediatypes
+        self.build_runtime_image = build_runtime_image
+        self.image_digest = ""
+        self.runtime_image_digest = ""
+        self.docker_config_directory = ""
+        self.metadata_file = f"{self.filepath}.metadata.json"
+        self.runtime_metadata_file = f"{self.filepath}.runtime.metadata.json"
         self.last_published = datetime.now()
         self.build_failed = False
 
@@ -93,36 +126,144 @@ class ImageBuilder(Base):
 
     def _build_and_push(self):
         self._build_image()
+        if self.build_failed:
+            raise RuntimeError("Docker image build or registry push failed")
+
+        if self.build_runtime_image and not self.no_push:
+            self._build_image(runtime=True)
+            if self.build_failed:
+                raise RuntimeError("Docker image build or registry push failed")
+
         if not self.build_failed and not self.no_push:
             self._push_docker_image()
         return self.data
 
     @step("Build Image")
-    def _build_image(self):
+    def _build_image(self, runtime: bool = False):
         # Note: build command and environment are different from when
         # build runs on the press server.
-        command = self._get_build_command()
         environment = self._get_build_environment()
-        result = self._run(
-            command=command,
-            environment=environment,
-            input_filepath=self.filepath,
-        )
-        self.output["build"] = []
-        self._publish_docker_build_output(result)
+        self._ensure_buildx_builder(environment)
+        command = self._get_build_command(runtime)
+        variant_output_start = len(self.output["build"])
+
+        for attempt in range(self.MAX_BUILD_ATTEMPTS):
+            result = self._run(
+                command=command,
+                environment=environment,
+                input_filepath=self.filepath,
+            )
+            del self.output["build"][variant_output_start:]
+            self._publish_docker_build_output(result)
+            if not self.build_failed:
+                self._load_image_digest(runtime)
+                break
+
+            if (
+                self.no_push
+                or attempt == self.MAX_BUILD_ATTEMPTS - 1
+                or not self._is_retryable_registry_failure(variant_output_start)
+            ):
+                raise RuntimeError("Docker image build or registry push failed")
+
+            time.sleep(self.REGISTRY_RETRY_DELAY)
+
         return {"output": self.output["build"]}
 
-    def _get_build_command(self) -> str:
-        command = f"docker buildx build --platform {self.platform}"
-        command = f"{command} -t {self._get_image_name()}"
+    def _is_retryable_registry_failure(self, output_start: int = 0):
+        output = "".join(self.output["build"][output_start:]).lower()
+        return any(marker in output for marker in self.REGISTRY_ERROR_MARKERS)
+
+    def _get_build_command(self, runtime: bool = False) -> str:
+        command = f"docker buildx build --builder {self.BUILDER_NAME} --platform {self.platform}"
+        image_name = self._get_image_name(runtime)
+        metadata_file = self.runtime_metadata_file if runtime else self.metadata_file
+        command = f"{command} -t {image_name}"
+        command = f"{command} --metadata-file {metadata_file}"
+
+        if runtime:
+            command = f"{command} --target runtime"
 
         if self.no_cache:
             command = f"{command} --no-cache"
 
+        if self.no_push:
+            command = f"{command} --load"
+        else:
+            command = f"{command} --provenance=false"
+            output = ",".join(
+                [
+                    "type=image",
+                    f"name={image_name}",
+                    "push=true",
+                    f"compression={self.image_compression}",
+                    f"compression-level={self.image_compression_level}",
+                    f"force-compression={str(self.force_compression).lower()}",
+                    f"oci-mediatypes={str(self.oci_mediatypes).lower()}",
+                    "name-canonical=true",
+                ]
+            )
+            command = f"{command} --output {output}"
+
         return f"{command} - "
+
+    def _ensure_buildx_builder(self, environment: dict):
+        with FileLock(self.BUILDER_LOCK):
+            result = subprocess.run(
+                ["docker", "buildx", "inspect", self.BUILDER_NAME],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            driver = next(
+                (
+                    line.partition(":")[2].strip()
+                    for line in result.stdout.splitlines()
+                    if line.startswith("Driver:")
+                ),
+                "",
+            )
+            if not result.returncode and driver != "docker-container":
+                subprocess.run(
+                    ["docker", "buildx", "rm", self.BUILDER_NAME],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                result = subprocess.CompletedProcess(result.args, 1)
+
+            if result.returncode:
+                subprocess.run(
+                    [
+                        "docker",
+                        "buildx",
+                        "create",
+                        "--name",
+                        self.BUILDER_NAME,
+                        "--driver",
+                        "docker-container",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+
+            subprocess.run(
+                ["docker", "buildx", "inspect", self.BUILDER_NAME, "--bootstrap"],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
 
     def _get_build_environment(self) -> dict:
         environment = os.environ.copy()
+        environment["BUILDX_CONFIG"] = environment.get(
+            "BUILDX_CONFIG",
+            os.path.join(environment.get("DOCKER_CONFIG", os.path.expanduser("~/.docker")), "buildx"),
+        )
         environment.update(
             {
                 "DOCKER_BUILDKIT": "1",
@@ -130,7 +271,62 @@ class ImageBuilder(Base):
                 "PROGRESS_NO_TRUNC": "1",
             }
         )
+
+        if not self.no_push:
+            if not self.docker_config_directory:
+                self.docker_config_directory = tempfile.mkdtemp(prefix="agent-docker-config-")
+                self._login_to_registry(environment)
+
+            environment["DOCKER_CONFIG"] = self.docker_config_directory
+
         return environment
+
+    def _login_to_registry(self, environment):
+        command = [
+            "docker",
+            "login",
+            self.registry["url"],
+            "--username",
+            self.registry["username"],
+            "--password-stdin",
+        ]
+        environment = {**environment, "DOCKER_CONFIG": self.docker_config_directory}
+        for attempt in range(self.MAX_BUILD_ATTEMPTS):
+            try:
+                subprocess.run(
+                    command,
+                    input=self.registry["password"],
+                    text=True,
+                    check=True,
+                    capture_output=True,
+                    env=environment,
+                )
+                return
+            except subprocess.CalledProcessError:
+                if attempt == self.MAX_BUILD_ATTEMPTS - 1:
+                    raise
+                time.sleep(self.REGISTRY_RETRY_DELAY)
+
+    def _load_image_digest(self, runtime: bool = False):
+        metadata_file = self.runtime_metadata_file if runtime else self.metadata_file
+        if self.build_failed or not os.path.exists(metadata_file):
+            return
+
+        with open(metadata_file) as file:
+            metadata = json.load(file)
+
+        image_digest = metadata.get("containerimage.digest", "")
+        if not image_digest:
+            return
+
+        if runtime:
+            self.runtime_image_digest = image_digest
+            self.data["runtime_image_digest"] = image_digest
+        else:
+            self.image_digest = image_digest
+            self.data["image_digest"] = image_digest
+        self.output["build"].append(f"#0 writing image {image_digest} done\n")
+        self._publish_throttled_output(True)
 
     def _publish_docker_build_output(self, result):
         for line in result:
@@ -138,61 +334,56 @@ class ImageBuilder(Base):
             self._publish_throttled_output(False)
         self._publish_throttled_output(True)
 
-    def _wait_for_registry_recovery(self):
-        """Wait for registry to recover after restart"""
-        time.sleep(60)
-
     @step("Push Docker Image")
     def _push_docker_image(self):
-        max_retries = 3
-        environment = os.environ.copy()
-        client = docker.from_env(environment=environment, timeout=5 * 60)
+        self._verify_pushed_image()
+        if self.build_runtime_image:
+            self._verify_pushed_image(runtime=True)
 
-        for attempt in range(max_retries):
-            self.output["push"].append({"id": "Retry", "output": "", "status": f"Success {attempt}"})
-            try:
-                if not is_registry_healthy(
-                    self.registry["url"], self.registry["username"], self.registry["password"]
-                ):
-                    raise RegistryDownException("Registry is currently down")
-
-                self._push_image(client)
-
-                if not is_registry_healthy(
-                    self.registry["url"], self.registry["username"], self.registry["password"]
-                ):
-                    raise RegistryDownException("Registry became unhealthy after push")
-
-                return self.output["push"]
-
-            except RegistryDownException as e:
-                if attempt == max_retries - 1:
-                    self._publish_throttled_output(True)
-                    raise Exception("Failed to push image after multiple attempts") from e
-
-                self._wait_for_registry_recovery()
-
-            except Exception:
-                self._publish_throttled_output(True)
-                raise
-
-        return None
-
-    def _push_image(self, client):
-        auth_config = {
-            "username": self.registry["username"],
-            "password": self.registry["password"],
-            "serveraddress": self.registry["url"],
-        }
-        for line in client.images.push(
-            self.image_repository,
-            self.image_tag,
-            stream=True,
-            decode=True,
-            auth_config=auth_config,
+        if not is_registry_healthy(
+            self.registry["url"], self.registry["username"], self.registry["password"]
         ):
-            self.output["push"].append(line)
-            self._publish_throttled_output(False)
+            raise RegistryDownException("Registry became unhealthy after push")
+
+        self.output["push"].append(
+            {
+                "id": self._get_image_name(),
+                "status": "Pushed",
+                "progress": self.image_digest,
+            }
+        )
+        if self.build_runtime_image:
+            self.output["push"].append(
+                {
+                    "id": self._get_image_name(runtime=True),
+                    "status": "Pushed",
+                    "progress": self.runtime_image_digest,
+                }
+            )
+        self._publish_throttled_output(True)
+        return self.output["push"]
+
+    def _verify_pushed_image(self, runtime: bool = False):
+        image_digest = self.runtime_image_digest if runtime else self.image_digest
+        if not image_digest:
+            raise RuntimeError("BuildKit did not return an image digest")
+
+        environment = os.environ.copy()
+        environment["DOCKER_CONFIG"] = self.docker_config_directory
+        subprocess.run(
+            [
+                "docker",
+                "buildx",
+                "imagetools",
+                "inspect",
+                f"{self._get_image_name(runtime)}@{image_digest}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5 * 60,
+            env=environment,
+        )
 
     def _publish_throttled_output(self, flush: bool):
         if flush:
@@ -206,8 +397,9 @@ class ImageBuilder(Base):
         self.last_published = now
         self.publish_data(self.output)
 
-    def _get_image_name(self):
-        return f"{self.image_repository}:{self.image_tag}"
+    def _get_image_name(self, runtime: bool = False):
+        image_tag = f"{self.image_tag}-runtime" if runtime else self.image_tag
+        return f"{self.image_repository}:{image_tag}"
 
     def _run(
         self,
@@ -238,11 +430,17 @@ class ImageBuilder(Base):
 
     @step("Cleanup Context")
     def _cleanup_context(self):
-        if not os.path.exists(self.filepath):
-            return {"cleanup": False}
+        cleaned = False
+        for path in [self.filepath, self.metadata_file, self.runtime_metadata_file]:
+            if os.path.exists(path):
+                os.remove(path)
+                cleaned = True
 
-        os.remove(self.filepath)
-        return {"cleanup": True}
+        if self.docker_config_directory:
+            shutil.rmtree(self.docker_config_directory, ignore_errors=True)
+            cleaned = True
+
+        return {"cleanup": cleaned}
 
 
 def get_image_build_context_directory():
