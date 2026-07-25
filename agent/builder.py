@@ -56,6 +56,7 @@ class ImageBuilder(Base):
         image_compression_level: int = 0,
         force_compression: bool = False,
         oci_mediatypes: bool = False,
+        build_runtime_image: bool = False,
     ) -> None:
         super().__init__()
 
@@ -77,9 +78,12 @@ class ImageBuilder(Base):
         self.image_compression_level = image_compression_level
         self.force_compression = force_compression
         self.oci_mediatypes = oci_mediatypes
+        self.build_runtime_image = build_runtime_image
         self.image_digest = ""
+        self.runtime_image_digest = ""
         self.docker_config_directory = ""
         self.metadata_file = f"{self.filepath}.metadata.json"
+        self.runtime_metadata_file = f"{self.filepath}.runtime.metadata.json"
         self.last_published = datetime.now()
         self.build_failed = False
 
@@ -125,17 +129,23 @@ class ImageBuilder(Base):
         if self.build_failed:
             raise RuntimeError("Docker image build or registry push failed")
 
+        if self.build_runtime_image and not self.no_push:
+            self._build_image(runtime=True)
+            if self.build_failed:
+                raise RuntimeError("Docker image build or registry push failed")
+
         if not self.build_failed and not self.no_push:
             self._push_docker_image()
         return self.data
 
     @step("Build Image")
-    def _build_image(self):
+    def _build_image(self, runtime: bool = False):
         # Note: build command and environment are different from when
         # build runs on the press server.
         environment = self._get_build_environment()
         self._ensure_buildx_builder(environment)
-        command = self._get_build_command()
+        command = self._get_build_command(runtime)
+        variant_output_start = len(self.output["build"])
 
         for attempt in range(self.MAX_BUILD_ATTEMPTS):
             result = self._run(
@@ -143,16 +153,16 @@ class ImageBuilder(Base):
                 environment=environment,
                 input_filepath=self.filepath,
             )
-            self.output["build"] = []
+            del self.output["build"][variant_output_start:]
             self._publish_docker_build_output(result)
             if not self.build_failed:
-                self._load_image_digest()
+                self._load_image_digest(runtime)
                 break
 
             if (
                 self.no_push
                 or attempt == self.MAX_BUILD_ATTEMPTS - 1
-                or not self._is_retryable_registry_failure()
+                or not self._is_retryable_registry_failure(variant_output_start)
             ):
                 raise RuntimeError("Docker image build or registry push failed")
 
@@ -160,14 +170,19 @@ class ImageBuilder(Base):
 
         return {"output": self.output["build"]}
 
-    def _is_retryable_registry_failure(self):
-        output = "".join(self.output["build"]).lower()
+    def _is_retryable_registry_failure(self, output_start: int = 0):
+        output = "".join(self.output["build"][output_start:]).lower()
         return any(marker in output for marker in self.REGISTRY_ERROR_MARKERS)
 
-    def _get_build_command(self) -> str:
+    def _get_build_command(self, runtime: bool = False) -> str:
         command = f"docker buildx build --builder {self.BUILDER_NAME} --platform {self.platform}"
-        command = f"{command} -t {self._get_image_name()}"
-        command = f"{command} --metadata-file {self.metadata_file}"
+        image_name = self._get_image_name(runtime)
+        metadata_file = self.runtime_metadata_file if runtime else self.metadata_file
+        command = f"{command} -t {image_name}"
+        command = f"{command} --metadata-file {metadata_file}"
+
+        if runtime:
+            command = f"{command} --target runtime"
 
         if self.no_cache:
             command = f"{command} --no-cache"
@@ -179,7 +194,7 @@ class ImageBuilder(Base):
             output = ",".join(
                 [
                     "type=image",
-                    f"name={self._get_image_name()}",
+                    f"name={image_name}",
                     "push=true",
                     f"compression={self.image_compression}",
                     f"compression-level={self.image_compression_level}",
@@ -292,19 +307,25 @@ class ImageBuilder(Base):
                     raise
                 time.sleep(self.REGISTRY_RETRY_DELAY)
 
-    def _load_image_digest(self):
-        if self.build_failed or not os.path.exists(self.metadata_file):
+    def _load_image_digest(self, runtime: bool = False):
+        metadata_file = self.runtime_metadata_file if runtime else self.metadata_file
+        if self.build_failed or not os.path.exists(metadata_file):
             return
 
-        with open(self.metadata_file) as file:
+        with open(metadata_file) as file:
             metadata = json.load(file)
 
-        self.image_digest = metadata.get("containerimage.digest", "")
-        if not self.image_digest:
+        image_digest = metadata.get("containerimage.digest", "")
+        if not image_digest:
             return
 
-        self.data["image_digest"] = self.image_digest
-        self.output["build"].append(f"#0 writing image {self.image_digest} done\n")
+        if runtime:
+            self.runtime_image_digest = image_digest
+            self.data["runtime_image_digest"] = image_digest
+        else:
+            self.image_digest = image_digest
+            self.data["image_digest"] = image_digest
+        self.output["build"].append(f"#0 writing image {image_digest} done\n")
         self._publish_throttled_output(True)
 
     def _publish_docker_build_output(self, result):
@@ -316,6 +337,8 @@ class ImageBuilder(Base):
     @step("Push Docker Image")
     def _push_docker_image(self):
         self._verify_pushed_image()
+        if self.build_runtime_image:
+            self._verify_pushed_image(runtime=True)
 
         if not is_registry_healthy(
             self.registry["url"], self.registry["username"], self.registry["password"]
@@ -329,11 +352,20 @@ class ImageBuilder(Base):
                 "progress": self.image_digest,
             }
         )
+        if self.build_runtime_image:
+            self.output["push"].append(
+                {
+                    "id": self._get_image_name(runtime=True),
+                    "status": "Pushed",
+                    "progress": self.runtime_image_digest,
+                }
+            )
         self._publish_throttled_output(True)
         return self.output["push"]
 
-    def _verify_pushed_image(self):
-        if not self.image_digest:
+    def _verify_pushed_image(self, runtime: bool = False):
+        image_digest = self.runtime_image_digest if runtime else self.image_digest
+        if not image_digest:
             raise RuntimeError("BuildKit did not return an image digest")
 
         environment = os.environ.copy()
@@ -344,7 +376,7 @@ class ImageBuilder(Base):
                 "buildx",
                 "imagetools",
                 "inspect",
-                f"{self._get_image_name()}@{self.image_digest}",
+                f"{self._get_image_name(runtime)}@{image_digest}",
             ],
             check=True,
             capture_output=True,
@@ -365,8 +397,9 @@ class ImageBuilder(Base):
         self.last_published = now
         self.publish_data(self.output)
 
-    def _get_image_name(self):
-        return f"{self.image_repository}:{self.image_tag}"
+    def _get_image_name(self, runtime: bool = False):
+        image_tag = f"{self.image_tag}-runtime" if runtime else self.image_tag
+        return f"{self.image_repository}:{image_tag}"
 
     def _run(
         self,
@@ -398,7 +431,7 @@ class ImageBuilder(Base):
     @step("Cleanup Context")
     def _cleanup_context(self):
         cleaned = False
-        for path in [self.filepath, self.metadata_file]:
+        for path in [self.filepath, self.metadata_file, self.runtime_metadata_file]:
             if os.path.exists(path):
                 os.remove(path)
                 cleaned = True
