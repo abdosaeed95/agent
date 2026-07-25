@@ -9,7 +9,13 @@ from agent.builder import ImageBuilder
 
 
 class TestImageBuilder(unittest.TestCase):
-    def get_builder(self, no_push=False, maximum_compression=True, build_runtime_image=False):
+    def get_builder(
+        self,
+        no_push=False,
+        maximum_compression=True,
+        build_runtime_image=False,
+        apply_new_build=True,
+    ):
         compression = {
             "image_compression": "zstd",
             "image_compression_level": 22,
@@ -30,8 +36,42 @@ class TestImageBuilder(unittest.TestCase):
                 },
                 platform="linux/amd64",
                 build_runtime_image=build_runtime_image,
+                apply_new_build=apply_new_build,
                 **(compression if maximum_compression else {}),
             )
+
+    def test_legacy_build_uses_original_local_build_command(self):
+        command = self.get_builder(apply_new_build=False)._get_build_command()
+
+        self.assertEqual(
+            command,
+            "docker buildx build --platform linux/amd64 -t registry.example.com/fodista/bench:candidate - ",
+        )
+
+    def test_legacy_build_cannot_publish_runtime_image(self):
+        builder = self.get_builder(build_runtime_image=True, apply_new_build=False)
+
+        self.assertFalse(builder.build_runtime_image)
+
+    @patch("agent.builder.is_registry_healthy", side_effect=[True, True])
+    @patch("agent.builder.docker.from_env")
+    def test_legacy_build_uses_original_registry_push(self, from_env, _registry):
+        builder = self.get_builder(apply_new_build=False)
+        from_env.return_value.images.push.return_value = []
+
+        builder._push_legacy_docker_image()
+
+        from_env.return_value.images.push.assert_called_once_with(
+            builder.image_repository,
+            builder.image_tag,
+            stream=True,
+            decode=True,
+            auth_config={
+                "username": "user",
+                "password": "password",
+                "serveraddress": "registry.example.com",
+            },
+        )
 
     def test_build_command_pushes_maximum_zstd_compression(self):
         command = self.get_builder()._get_build_command()
