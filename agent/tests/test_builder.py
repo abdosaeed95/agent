@@ -108,6 +108,26 @@ class TestImageBuilder(unittest.TestCase):
         self.assertIn("name=registry.example.com/fodista/bench:candidate-runtime", command)
         self.assertIn(".runtime.metadata.json", command)
 
+    def test_runtime_build_reuses_registry_cache(self):
+        command = self.get_builder(build_runtime_image=True)._get_build_command(runtime=True)
+
+        cache_ref = "registry.example.com/fodista/bench:runtime-buildcache"
+        self.assertIn(f"--cache-from type=registry,ref={cache_ref}", command)
+        self.assertIn(f"--cache-to type=registry,ref={cache_ref},mode=min", command)
+        self.assertIn("compression=zstd", command)
+        self.assertIn("compression-level=22", command)
+        self.assertIn("force-compression=false", command)
+        self.assertNotIn("force-compression=true", command)
+        self.assertIn("image-manifest=true", command)
+        self.assertIn("ignore-error=true", command)
+
+    def test_full_and_local_builds_do_not_publish_runtime_cache(self):
+        self.assertNotIn("runtime-buildcache", self.get_builder()._get_build_command())
+        self.assertNotIn(
+            "runtime-buildcache",
+            self.get_builder(no_push=True)._get_build_command(runtime=True),
+        )
+
     @patch.object(ImageBuilder, "_push_docker_image")
     @patch.object(ImageBuilder, "_build_image")
     def test_runtime_image_is_built_after_full_image(self, build_image, _push_image):

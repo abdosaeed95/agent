@@ -208,10 +208,22 @@ class ImageBuilder(Base):
         if self.no_cache:
             command = f"{command} --no-cache"
 
+        if runtime and not self.no_push:
+            cache_ref = f"{self.image_repository}:runtime-buildcache"
+            command = f"{command} --cache-from type=registry,ref={cache_ref}"
+            command = (
+                f"{command} --cache-to type=registry,ref={cache_ref},mode=min,"
+                f"compression={self.image_compression},"
+                f"compression-level={self.image_compression_level},"
+                "force-compression=false,oci-mediatypes=true,"
+                "image-manifest=true,ignore-error=true"
+            )
+
         if self.no_push:
             command = f"{command} --load"
         else:
             command = f"{command} --provenance=false"
+            force_compression = self.force_compression and not runtime
             output = ",".join(
                 [
                     "type=image",
@@ -219,7 +231,7 @@ class ImageBuilder(Base):
                     "push=true",
                     f"compression={self.image_compression}",
                     f"compression-level={self.image_compression_level}",
-                    f"force-compression={str(self.force_compression).lower()}",
+                    f"force-compression={str(force_compression).lower()}",
                     f"oci-mediatypes={str(self.oci_mediatypes).lower()}",
                     "name-canonical=true",
                 ]
