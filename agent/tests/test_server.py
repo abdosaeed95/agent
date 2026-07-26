@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from agent.server import Server
 
@@ -89,6 +89,41 @@ class TestServerProxyDetection(unittest.TestCase):
         args, _ = render_template.call_args
         _, context, _ = args
         self.assertFalse(context.get("is_proxy_server", False))
+
+    def test_update_site_installs_destination_apps_before_migrate(self):
+        server = self._get_server({})
+        server.move_site = MagicMock()
+        server.reload_nginx = MagicMock()
+        source = MagicMock()
+        target = MagicMock()
+        target.apps = {"frappe": MagicMock(), "erpnext": MagicMock()}
+        source_site = MagicMock()
+        destination_site = MagicMock()
+
+        with patch("agent.server.Bench", side_effect=[source, target]), patch(
+            "agent.server.Site", side_effect=[source_site, destination_site]
+        ):
+            Server.update_site_migrate_job.__wrapped__(
+                server,
+                "example.com",
+                "source",
+                "target",
+                False,
+                False,
+                True,
+                install_all_apps=True,
+            )
+
+        destination_site.install_apps.assert_called_once_with(target.apps)
+        self.assertLess(
+            destination_site.mock_calls.index(call.install_apps(target.apps)),
+            destination_site.mock_calls.index(
+                call.migrate(
+                    skip_search_index=True,
+                    skip_failing_patches=False,
+                )
+            ),
+        )
 
 
 if __name__ == "__main__":
