@@ -323,6 +323,7 @@ class Server(Base):
         skip_backups,
         before_migrate_scripts: dict[str, str] | None = None,
         skip_search_index: bool = True,
+        install_all_apps: bool = False,
     ):
         if before_migrate_scripts is None:
             before_migrate_scripts = {}
@@ -345,6 +346,9 @@ class Server(Base):
         self.reload_nginx()
 
         site = Site(name, target)
+
+        if install_all_apps:
+            site.install_apps(target.apps)
 
         if before_migrate_scripts:
             site.run_app_scripts(before_migrate_scripts)
