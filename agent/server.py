@@ -348,7 +348,7 @@ class Server(Base):
         site = Site(name, target)
 
         if install_all_apps:
-            site.install_apps(target.apps)
+            site.install_apps(target.app_names)
 
         if before_migrate_scripts:
             site.run_app_scripts(before_migrate_scripts)

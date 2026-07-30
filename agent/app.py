@@ -7,7 +7,7 @@ from agent.base import Base
 
 class App(Base):
     def __init__(self, name, bench):
-        super.__init__()
+        super().__init__()
 
         self.name = name
         self.directory = os.path.join(bench.directory, "apps", name)
