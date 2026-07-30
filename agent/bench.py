@@ -555,12 +555,14 @@ class Bench(Base):
         return self.docker_execute(f"bench build --apps {','.join(apps)}")
 
     @property
-    def apps(self):
+    def app_names(self):
         with open(self.apps_file, "r") as f:
-            apps_list = f.read().split("\n")
+            return f.read().splitlines()
 
+    @property
+    def apps(self):
         apps = {}
-        for directory in apps_list:
+        for directory in self.app_names:
             with suppress(Exception):
                 apps[directory] = App(directory, self)
         return apps

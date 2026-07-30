@@ -97,7 +97,7 @@ class TestServerProxyDetection(unittest.TestCase):
         server.reload_nginx = MagicMock()
         source = MagicMock()
         target = MagicMock()
-        target.apps = {"frappe": MagicMock(), "erpnext": MagicMock()}
+        target.app_names = ["frappe", "erpnext"]
         source_site = MagicMock()
         destination_site = MagicMock()
 
@@ -115,9 +115,9 @@ class TestServerProxyDetection(unittest.TestCase):
                 install_all_apps=True,
             )
 
-        destination_site.install_apps.assert_called_once_with(target.apps)
+        destination_site.install_apps.assert_called_once_with(target.app_names)
         self.assertLess(
-            destination_site.mock_calls.index(call.install_apps(target.apps)),
+            destination_site.mock_calls.index(call.install_apps(target.app_names)),
             destination_site.mock_calls.index(
                 call.migrate(
                     skip_search_index=True,

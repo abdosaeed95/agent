@@ -6,6 +6,7 @@ import shutil
 import unittest
 from unittest.mock import patch
 
+from agent.app import App
 from agent.base import AgentException
 from agent.bench import Bench
 from agent.server import Server
@@ -124,3 +125,16 @@ class TestSite(unittest.TestCase):
             bench.valid_sites[site_name]
         except KeyError:
             self.fail("Site not found in bench.sites")
+
+    def test_bench_reads_runtime_app_names_without_git_metadata(self):
+        bench = self._get_test_bench()
+
+        self.assertEqual(bench.app_names, ["frappe", "erpnext"])
+
+    def test_bench_discovers_git_apps(self):
+        bench = self._get_test_bench()
+        os.makedirs(os.path.join(self.apps_directory, "frappe"))
+        os.makedirs(os.path.join(self.apps_directory, "erpnext"))
+
+        with patch.object(App, "execute", return_value={"output": "true"}):
+            self.assertEqual(list(bench.apps), ["frappe", "erpnext"])
