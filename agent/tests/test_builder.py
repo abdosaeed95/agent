@@ -104,8 +104,8 @@ class TestImageBuilder(unittest.TestCase):
         command = self.get_builder(build_runtime_image=True)._get_build_command(runtime=True)
 
         self.assertIn("--target runtime", command)
-        self.assertIn("-t registry.example.com/fodista/bench:candidate-runtime", command)
-        self.assertIn("name=registry.example.com/fodista/bench:candidate-runtime", command)
+        self.assertIn("-t registry.example.com/fodista/bench:candidate-slim", command)
+        self.assertIn("name=registry.example.com/fodista/bench:candidate-slim", command)
         self.assertIn(".runtime.metadata.json", command)
 
     def test_runtime_build_reuses_registry_cache(self):
@@ -182,7 +182,7 @@ class TestImageBuilder(unittest.TestCase):
         builder._verify_pushed_image(runtime=True)
 
         self.assertIn(
-            "registry.example.com/fodista/bench:candidate-runtime@sha256:def456",
+            "registry.example.com/fodista/bench:candidate-slim@sha256:def456",
             run.call_args.args[0],
         )
 
@@ -205,7 +205,7 @@ class TestImageBuilder(unittest.TestCase):
             [item["id"] for item in output],
             [
                 "registry.example.com/fodista/bench:candidate",
-                "registry.example.com/fodista/bench:candidate-runtime",
+                "registry.example.com/fodista/bench:candidate-slim",
             ],
         )
 
