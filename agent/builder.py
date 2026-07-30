@@ -487,7 +487,7 @@ class ImageBuilder(Base):
         self.publish_data(self.output)
 
     def _get_image_name(self, runtime: bool = False):
-        image_tag = f"{self.image_tag}-runtime" if runtime else self.image_tag
+        image_tag = f"{self.image_tag}-slim" if runtime else self.image_tag
         return f"{self.image_repository}:{image_tag}"
 
     def _run(
