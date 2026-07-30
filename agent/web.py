@@ -830,6 +830,19 @@ def deactivate_site(bench, site):
 )
 @validate_bench_and_site
 def update_site_migrate(bench, site):
+    return _update_site_migrate(bench, site, request.json.get("install_all_apps", False))
+
+
+@application.route(
+    "/benches/<string:bench>/sites/<string:site>/update/migrate/install-apps",
+    methods=["POST"],
+)
+@validate_bench_and_site
+def update_site_migrate_install_apps(bench, site):
+    return _update_site_migrate(bench, site, True)
+
+
+def _update_site_migrate(bench, site, install_all_apps):
     data = request.json
     job = Server().update_site_migrate_job(
         site,
@@ -840,7 +853,7 @@ def update_site_migrate(bench, site):
         data.get("skip_backups", False),
         data.get("before_migrate_scripts", {}),
         data.get("skip_search_index", True),
-        data.get("install_all_apps", False),
+        install_all_apps,
     )
     return {"job": job}
 

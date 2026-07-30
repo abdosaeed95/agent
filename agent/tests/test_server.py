@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, call, patch
 
+from agent import web
 from agent.server import Server
 
 
@@ -124,6 +125,24 @@ class TestServerProxyDetection(unittest.TestCase):
                 )
             ),
         )
+
+    def test_install_apps_migrate_route_forces_installation(self):
+        server = MagicMock()
+        server.update_site_migrate_job.return_value = "job-1"
+        payload = {
+            "target": "bench-target",
+            "activate": True,
+            "skip_failing_patches": False,
+            "skip_backups": True,
+        }
+
+        with web.application.test_request_context(json=payload), patch.object(
+            web, "Server", return_value=server
+        ):
+            result = web.update_site_migrate_install_apps.__wrapped__("bench-source", "example.com")
+
+        self.assertEqual(result, {"job": "job-1"})
+        self.assertTrue(server.update_site_migrate_job.call_args.args[-1])
 
 
 if __name__ == "__main__":
