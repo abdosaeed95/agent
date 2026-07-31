@@ -854,6 +854,7 @@ def _update_site_migrate(bench, site, install_all_apps):
         data.get("before_migrate_scripts", {}),
         data.get("skip_search_index", True),
         install_all_apps,
+        data.get("skip_migrate", False),
     )
     return {"job": job}
 
