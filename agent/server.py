@@ -324,6 +324,7 @@ class Server(Base):
         before_migrate_scripts: dict[str, str] | None = None,
         skip_search_index: bool = True,
         install_all_apps: bool = False,
+        skip_migrate: bool = False,
     ):
         if before_migrate_scripts is None:
             before_migrate_scripts = {}
@@ -353,13 +354,14 @@ class Server(Base):
         if before_migrate_scripts:
             site.run_app_scripts(before_migrate_scripts)
 
-        try:
-            site.migrate(
-                skip_search_index=skip_search_index,
-                skip_failing_patches=skip_failing_patches,
-            )
-        finally:
-            site.log_touched_tables()
+        if not skip_migrate:
+            try:
+                site.migrate(
+                    skip_search_index=skip_search_index,
+                    skip_failing_patches=skip_failing_patches,
+                )
+            finally:
+                site.log_touched_tables()
 
         with suppress(Exception):
             site.bench_execute(

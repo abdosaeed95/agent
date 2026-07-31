@@ -142,6 +142,49 @@ class TestServerProxyDetection(unittest.TestCase):
             result = web.update_site_migrate_install_apps.__wrapped__("bench-source", "example.com")
 
         self.assertEqual(result, {"job": "job-1"})
+        self.assertTrue(server.update_site_migrate_job.call_args.args[-2])
+        self.assertFalse(server.update_site_migrate_job.call_args.args[-1])
+
+    def test_update_site_can_skip_migrate_command(self):
+        server = self._get_server({})
+        server.move_site = MagicMock()
+        server.reload_nginx = MagicMock()
+        source = MagicMock()
+        target = MagicMock()
+        target.app_names = ["frappe", "erpnext"]
+        source_site = MagicMock()
+        destination_site = MagicMock()
+
+        with patch("agent.server.Bench", side_effect=[source, target]), patch(
+            "agent.server.Site", side_effect=[source_site, destination_site]
+        ):
+            Server.update_site_migrate_job.__wrapped__(
+                server,
+                "example.com",
+                "source",
+                "target",
+                False,
+                False,
+                True,
+                install_all_apps=True,
+                skip_migrate=True,
+            )
+
+        destination_site.install_apps.assert_called_once_with(target.app_names)
+        destination_site.migrate.assert_not_called()
+        destination_site.log_touched_tables.assert_not_called()
+
+    def test_migrate_route_passes_skip_migrate(self):
+        server = MagicMock()
+        server.update_site_migrate_job.return_value = "job-1"
+        payload = {"target": "bench-target", "skip_migrate": True}
+
+        with web.application.test_request_context(json=payload), patch.object(
+            web, "Server", return_value=server
+        ):
+            result = web.update_site_migrate.__wrapped__("bench-source", "example.com")
+
+        self.assertEqual(result, {"job": "job-1"})
         self.assertTrue(server.update_site_migrate_job.call_args.args[-1])
 
 
