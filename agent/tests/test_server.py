@@ -91,7 +91,7 @@ class TestServerProxyDetection(unittest.TestCase):
         _, context, _ = args
         self.assertFalse(context.get("is_proxy_server", False))
 
-    def test_update_site_installs_destination_apps_before_migrate(self):
+    def test_update_site_installs_destination_apps_after_migrate(self):
         server = self._get_server({})
         server.move_site = MagicMock()
         server.reload_nginx = MagicMock()
@@ -117,13 +117,13 @@ class TestServerProxyDetection(unittest.TestCase):
 
         destination_site.install_apps.assert_called_once_with(target.app_names)
         self.assertLess(
-            destination_site.mock_calls.index(call.install_apps(target.app_names)),
             destination_site.mock_calls.index(
                 call.migrate(
                     skip_search_index=True,
                     skip_failing_patches=False,
                 )
             ),
+            destination_site.mock_calls.index(call.install_apps(target.app_names)),
         )
 
     def test_install_apps_migrate_route_forces_installation(self):
@@ -139,11 +139,38 @@ class TestServerProxyDetection(unittest.TestCase):
         with web.application.test_request_context(json=payload), patch.object(
             web, "Server", return_value=server
         ):
-            result = web.update_site_migrate_install_apps.__wrapped__("bench-source", "example.com")
+            result = web.update_site_migrate_install_apps.__wrapped__(
+                "bench-source", "example.com"
+            )
 
         self.assertEqual(result, {"job": "job-1"})
         self.assertTrue(server.update_site_migrate_job.call_args.args[-2])
         self.assertFalse(server.update_site_migrate_job.call_args.args[-1])
+
+    def test_failed_migration_does_not_install_apps_or_activate_site(self):
+        server = self._get_server({})
+        server.move_site = MagicMock()
+        server.reload_nginx = MagicMock()
+        destination_site = MagicMock()
+        destination_site.migrate.side_effect = RuntimeError("migration failed")
+
+        with patch("agent.server.Bench"), patch(
+            "agent.server.Site", side_effect=[MagicMock(), destination_site]
+        ), self.assertRaises(RuntimeError):
+            Server.update_site_migrate_job.__wrapped__(
+                server,
+                "example.com",
+                "source",
+                "target",
+                True,
+                False,
+                True,
+                install_all_apps=True,
+            )
+
+        destination_site.log_touched_tables.assert_called_once()
+        destination_site.install_apps.assert_not_called()
+        destination_site.disable_maintenance_mode.assert_not_called()
 
     def test_update_site_can_skip_migrate_command(self):
         server = self._get_server({})
