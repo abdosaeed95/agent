@@ -139,9 +139,7 @@ class TestServerProxyDetection(unittest.TestCase):
         with web.application.test_request_context(json=payload), patch.object(
             web, "Server", return_value=server
         ):
-            result = web.update_site_migrate_install_apps.__wrapped__(
-                "bench-source", "example.com"
-            )
+            result = web.update_site_migrate_install_apps.__wrapped__("bench-source", "example.com")
 
         self.assertEqual(result, {"job": "job-1"})
         self.assertTrue(server.update_site_migrate_job.call_args.args[-2])
