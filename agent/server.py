@@ -348,9 +348,6 @@ class Server(Base):
 
         site = Site(name, target)
 
-        if install_all_apps:
-            site.install_apps(target.app_names)
-
         if before_migrate_scripts:
             site.run_app_scripts(before_migrate_scripts)
 
@@ -362,6 +359,9 @@ class Server(Base):
                 )
             finally:
                 site.log_touched_tables()
+
+        if install_all_apps:
+            site.install_apps(target.app_names)
 
         with suppress(Exception):
             site.bench_execute(
