@@ -91,7 +91,7 @@ class TestServerProxyDetection(unittest.TestCase):
         _, context, _ = args
         self.assertFalse(context.get("is_proxy_server", False))
 
-    def test_update_site_installs_destination_apps_after_migrate(self):
+    def test_update_site_installs_destination_apps_before_migrate(self):
         server = self._get_server({})
         server.move_site = MagicMock()
         server.reload_nginx = MagicMock()
@@ -117,13 +117,13 @@ class TestServerProxyDetection(unittest.TestCase):
 
         destination_site.install_apps.assert_called_once_with(target.app_names)
         self.assertLess(
+            destination_site.mock_calls.index(call.install_apps(target.app_names)),
             destination_site.mock_calls.index(
                 call.migrate(
                     skip_search_index=True,
                     skip_failing_patches=False,
                 )
             ),
-            destination_site.mock_calls.index(call.install_apps(target.app_names)),
         )
 
     def test_install_apps_migrate_route_forces_installation(self):
@@ -145,7 +145,7 @@ class TestServerProxyDetection(unittest.TestCase):
         self.assertTrue(server.update_site_migrate_job.call_args.args[-2])
         self.assertFalse(server.update_site_migrate_job.call_args.args[-1])
 
-    def test_failed_migration_does_not_install_apps_or_activate_site(self):
+    def test_failed_migration_logs_touched_tables_without_activating_site(self):
         server = self._get_server({})
         server.move_site = MagicMock()
         server.reload_nginx = MagicMock()
@@ -167,7 +167,7 @@ class TestServerProxyDetection(unittest.TestCase):
             )
 
         destination_site.log_touched_tables.assert_called_once()
-        destination_site.install_apps.assert_not_called()
+        destination_site.install_apps.assert_called_once()
         destination_site.disable_maintenance_mode.assert_not_called()
 
     def test_update_site_can_skip_migrate_command(self):
@@ -197,7 +197,50 @@ class TestServerProxyDetection(unittest.TestCase):
 
         destination_site.install_apps.assert_called_once_with(target.app_names)
         destination_site.migrate.assert_not_called()
-        destination_site.log_touched_tables.assert_not_called()
+        destination_site.log_touched_tables.assert_called_once()
+
+    def test_failed_installation_does_not_migrate_or_activate_site(self):
+        server = self._get_server({})
+        server.move_site = MagicMock()
+        server.reload_nginx = MagicMock()
+        destination_site = MagicMock()
+        destination_site.install_apps.side_effect = RuntimeError("installation failed")
+
+        with patch("agent.server.Bench"), patch(
+            "agent.server.Site", side_effect=[MagicMock(), destination_site]
+        ), self.assertRaises(RuntimeError):
+            Server.update_site_migrate_job.__wrapped__(
+                server,
+                "example.com",
+                "source",
+                "target",
+                True,
+                False,
+                True,
+                install_all_apps=True,
+            )
+
+        destination_site.log_touched_tables.assert_called_once()
+        destination_site.migrate.assert_not_called()
+        destination_site.disable_maintenance_mode.assert_not_called()
+
+    def test_update_site_without_installation_keeps_migrate_only_behavior(self):
+        server = self._get_server({})
+        server.move_site = MagicMock()
+        server.reload_nginx = MagicMock()
+        destination_site = MagicMock()
+
+        with patch("agent.server.Bench"), patch(
+            "agent.server.Site", side_effect=[MagicMock(), destination_site]
+        ):
+            Server.update_site_migrate_job.__wrapped__(
+                server, "example.com", "source", "target", True, False, True
+            )
+
+        destination_site.install_apps.assert_not_called()
+        destination_site.migrate.assert_called_once_with(skip_search_index=True, skip_failing_patches=False)
+        destination_site.log_touched_tables.assert_called_once()
+        destination_site.disable_maintenance_mode.assert_called_once()
 
     def test_migrate_route_passes_skip_migrate(self):
         server = MagicMock()
