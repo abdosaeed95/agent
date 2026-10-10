@@ -351,17 +351,18 @@ class Server(Base):
         if before_migrate_scripts:
             site.run_app_scripts(before_migrate_scripts)
 
-        if not skip_migrate:
-            try:
+        try:
+            if install_all_apps:
+                site.install_apps(target.app_names)
+
+            if not skip_migrate:
                 site.migrate(
                     skip_search_index=skip_search_index,
                     skip_failing_patches=skip_failing_patches,
                 )
-            finally:
+        finally:
+            if install_all_apps or not skip_migrate:
                 site.log_touched_tables()
-
-        if install_all_apps:
-            site.install_apps(target.app_names)
 
         with suppress(Exception):
             site.bench_execute(
