@@ -110,6 +110,13 @@ def pyspy():
 
 
 @setup.command()
+def cli_sandbox():
+    from agent.cli_sandbox import setup_cli_sandbox
+
+    setup_cli_sandbox()
+
+
+@setup.command()
 @click.option("--password", prompt=True, hide_input=True)
 def authentication(password):
     Server().setup_authentication(password)

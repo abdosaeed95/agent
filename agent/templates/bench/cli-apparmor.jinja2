@@ -1,0 +1,42 @@
+# Based on Moby's Apache-2.0 licensed docker-default profile:
+# https://github.com/moby/moby/blob/v28.1.1/profiles/apparmor/template.go
+# See cli-profiles.LICENSE.
+#include <tunables/global>
+
+profile {{ profile_name }} flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  network,
+  capability,
+  file,
+  umount,
+  # Bubblewrap mounts and pivots its filesystem inside its own user namespace.
+  mount,
+  pivot_root,
+{% if userns %}
+  userns,
+{% endif %}
+  signal (receive) peer=unconfined,
+  signal (receive) peer=runc,
+  signal (receive) peer=crun,
+  signal (send,receive) peer={{ profile_name }},
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9/]*}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+  # Preserve Docker's masked and read-only paths without locked proc mounts.
+  deny @{PROC}/{acpi,asound,scsi}{,/**} rwklx,
+  deny @{PROC}/{interrupts,keys,latency_stats,timer_list,timer_stats,sched_debug} rwklx,
+  deny @{PROC}/{bus,fs,irq,sys}{,/**} wklx,
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/devices/system/cpu/cpu*/thermal_throttle{,/**} rwklx,
+  deny /sys/kernel/security/** rwklx,
+  ptrace (trace,read,tracedby,readby) peer={{ profile_name }},
+}
