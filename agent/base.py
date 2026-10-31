@@ -104,7 +104,7 @@ class Base:
                 process._stdin_write(input.encode())
 
             output = self.parse_output(process)
-            returncode = process.poll() or 0
+            returncode = process.wait()
             # This is equivalent of check=True
             # Raise an exception if the process returns a non-zero return code
             if non_zero_throw and returncode:

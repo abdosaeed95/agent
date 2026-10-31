@@ -138,3 +138,16 @@ dmypy.json
 .vim/
 
 .DS_Store
+
+# Local tooling and generated verification artifacts
+superpowers/
+.superpowers/
+docs/superpowers/
+.agents/skills/superpowers/
+.codex/superpowers/
+output/
+playwright-report/
+test-results/
+blob-report/
+.playwright/
+.playwright-cli/

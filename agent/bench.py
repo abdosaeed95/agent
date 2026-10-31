@@ -13,6 +13,7 @@ from functools import partial
 from glob import glob
 from pathlib import Path, PurePath
 from random import choices
+from shlex import quote
 from textwrap import indent
 from typing import TYPE_CHECKING, TypedDict
 
@@ -20,6 +21,7 @@ import requests
 
 from agent.app import App
 from agent.base import AgentException, Base
+from agent.cli_sandbox import POLICY_LABEL, POLICY_VERSION, PROFILE_NAME, SECCOMP_PROFILE
 from agent.exceptions import InvalidSiteConfigException, SiteNotExistsException
 from agent.job import job, step
 from agent.site import Site
@@ -712,18 +714,37 @@ class Bench(Base):
 
                 _create_mounts(host_path)
 
-            mounts_cmd += f" -v {host_path}:{destination_path} "
+            mounts_cmd += f" -v {quote(f'{host_path}:{destination_path}')} "
 
         return mounts_cmd
 
+    @property
+    def requires_cli_sandbox(self) -> bool:
+        return "ai" in Path(self.apps_file).read_text().splitlines()
+
+    def verify_cli_sandbox(self):
+        options = (
+            f"--security-opt seccomp={quote(str(SECCOMP_PROFILE))} "
+            f"--security-opt apparmor={PROFILE_NAME} "
+            # Locked proc mounts prevent a nested user namespace from mounting proc.
+            "--security-opt systempaths=unconfined "
+            f"--security-opt no-new-privileges --label {POLICY_LABEL}={POLICY_VERSION} "
+        )
+        self.execute(
+            "docker run --rm --network none -u frappe "
+            f"{options} --entrypoint /usr/bin/bwrap "
+            f"{quote(self.bench_config['docker_image'])} "
+            "--unshare-all --die-with-parent --new-session --ro-bind / / "
+            "--proc /proc --dev /dev -- /usr/bin/true"
+        )
+        return options
+
     def start(self):
         if self.bench_config.get("single_container"):
-            try:
-                self.execute(f"docker stop {self.name}")
-                self.execute(f"docker rm {self.name}")
-            except Exception:
-                pass
-
+            sandbox_options = ""
+            if self.requires_cli_sandbox:
+                # Verify the image and policies before stopping a working bench.
+                sandbox_options = self.verify_cli_sandbox()
             ssh_port = self.bench_config.get("ssh_port", self.bench_config["web_port"] + 4000)
             ssh_ip = self.bench_config.get("private_ip", "127.0.0.1")
 
@@ -732,9 +753,17 @@ class Bench(Base):
 
             bench_directory = "/home/frappe/frappe-bench"
             mounts = self.prepare_mounts_on_host(bench_directory)
+            limits = self._runtime_limit_options(
+                self.bench_config.get("memory_high"),
+                self.bench_config.get("memory_max"),
+                self.bench_config.get("memory_swap"),
+                self.bench_config.get("vcpu"),
+            )
 
             command = (
                 "docker run -d --init -u frappe "
+                f"{sandbox_options}"
+                f"{limits} "
                 f"--restart always --hostname {self.name} "
                 f"-p 127.0.0.1:{self.bench_config['web_port']}:8000 "
                 f"-p 127.0.0.1:{self.bench_config['socketio_port']}:9000 "
@@ -747,6 +776,11 @@ class Bench(Base):
                 f"{mounts} "
                 f"--name {self.name} {self.bench_config['docker_image']}"
             )
+            try:
+                self.execute(f"docker stop {self.name}")
+                self.execute(f"docker rm {self.name}")
+            except Exception:
+                pass
         else:
             command = (
                 "docker stack deploy "
@@ -786,16 +820,21 @@ class Bench(Base):
 
     @step("Update Bench Memory Limits")
     def _update_runtime_limits(self, memory_high, memory_max, memory_swap, vcpu):
-        cmd = f"docker update {self.name}"
+        options = self._runtime_limit_options(memory_high, memory_max, memory_swap, vcpu)
+        return self.execute(f"docker update {self.name}{options}")
+
+    @staticmethod
+    def _runtime_limit_options(memory_high, memory_max, memory_swap, vcpu):
+        options = ""
         if memory_high:
-            cmd += f" --memory-reservation={memory_high}M"
+            options += f" --memory-reservation={memory_high}M"
         if memory_max:
-            cmd += f" --memory={memory_max}M"
+            options += f" --memory={memory_max}M"
         if memory_swap:
-            cmd += f" --memory-swap={memory_swap}M"
+            options += f" --memory-swap={memory_swap}M"
         if vcpu:
-            cmd += f" --cpus={vcpu}"
-        return self.execute(cmd)
+            options += f" --cpus={vcpu}"
+        return options
 
     def _update_database_host(self, db_host: str):
         self._update_config({"db_host": db_host})
