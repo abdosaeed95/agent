@@ -46,6 +46,7 @@ http {
 	server_tokens off;
 
 	more_set_headers 'Server: Frappe Cloud';
+	more_set_headers 'X-Robots-Tag: noindex';
 
 	keepalive_timeout 10;
 	keepalive_requests 10;
