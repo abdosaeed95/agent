@@ -138,6 +138,11 @@ dmypy.json
 .vim/
 
 .DS_Store
+output/
+playwright-report/
+test-results/
+blob-report/
+.playwright/
 .superpowers/
 docs/superpowers/
 .agents/skills/superpowers/
