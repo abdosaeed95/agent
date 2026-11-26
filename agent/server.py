@@ -214,7 +214,11 @@ class Server(Base):
     @job("Cleanup Unused Files", priority="low")
     def cleanup_unused_files(self, force: bool = False):
         self.remove_archived_benches(force)
-        self.remove_temporary_files(force)
+        try:
+            self.remove_temporary_files(force)
+        except OSError:
+            self.remove_unused_docker_artefacts()
+            raise
         self.remove_unused_docker_artefacts()
 
     def remove_benches_without_container(self, benches: list[str]):

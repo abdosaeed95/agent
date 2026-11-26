@@ -3,8 +3,39 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, call, patch
 
+from rq.timeouts import JobTimeoutException
+
 from agent import web
 from agent.server import Server
+
+
+class TestServerCleanup(unittest.TestCase):
+    def test_cleanup_prunes_docker_after_temporary_file_permission_error(self):
+        server = MagicMock(spec=Server)
+        error = PermissionError("Permission denied: 'node'")
+        server.remove_temporary_files.side_effect = error
+
+        with self.assertRaises(PermissionError) as failure:
+            Server.cleanup_unused_files.__wrapped__(server, force=False)
+
+        self.assertIs(failure.exception, error)
+        self.assertEqual(
+            server.mock_calls,
+            [
+                call.remove_archived_benches(False),
+                call.remove_temporary_files(False),
+                call.remove_unused_docker_artefacts(),
+            ],
+        )
+
+    def test_cleanup_does_not_prune_docker_after_job_timeout(self):
+        server = MagicMock(spec=Server)
+        server.remove_temporary_files.side_effect = JobTimeoutException()
+
+        with self.assertRaises(JobTimeoutException):
+            Server.cleanup_unused_files.__wrapped__(server)
+
+        server.remove_unused_docker_artefacts.assert_not_called()
 
 
 class TestServerProxyDetection(unittest.TestCase):
