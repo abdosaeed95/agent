@@ -9,6 +9,7 @@ import tempfile
 import time
 from contextlib import suppress
 from datetime import datetime
+from shlex import quote
 
 from jinja2 import Environment, PackageLoader
 from passlib.hash import pbkdf2_sha256 as pbkdf2
@@ -216,7 +217,7 @@ class Server(Base):
         self.remove_archived_benches(force)
         try:
             self.remove_temporary_files(force)
-        except OSError:
+        except (AgentException, OSError):
             self.remove_unused_docker_artefacts()
             raise
         self.remove_unused_docker_artefacts()
@@ -982,7 +983,7 @@ class Server(Base):
         self.execute("sudo supervisorctl update")
 
     def _get_tree_size(self, path):
-        return self.execute(f"du -sh {path}")["output"].split()[0]
+        return self.execute(f"du -sh -- {quote(path)}")["output"].split()[0]
 
     def long_method(
         self,
