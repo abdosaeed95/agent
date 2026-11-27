@@ -3,8 +3,51 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, call, patch
 
+from rq.timeouts import JobTimeoutException
+
 from agent import web
+from agent.exceptions import AgentException
 from agent.server import Server
+
+
+class TestServerCleanup(unittest.TestCase):
+    def test_cleanup_prunes_docker_after_temporary_file_errors(self):
+        errors = (PermissionError("Permission denied: 'node'"), AgentException({"returncode": 1}))
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                server = MagicMock(spec=Server)
+                server.remove_temporary_files.side_effect = error
+
+                with self.assertRaises(type(error)) as failure:
+                    Server.cleanup_unused_files.__wrapped__(server, force=False)
+
+                self.assertIs(failure.exception, error)
+                self.assertEqual(
+                    server.mock_calls,
+                    [
+                        call.remove_archived_benches(False),
+                        call.remove_temporary_files(False),
+                        call.remove_unused_docker_artefacts(),
+                    ],
+                )
+
+    def test_get_tree_size_passes_path_with_spaces_as_one_argument(self):
+        server = MagicMock(spec=Server)
+        server.execute.return_value = {"output": "4.0K\t/tmp/yarn-cache with spaces"}
+
+        size = Server._get_tree_size(server, "/tmp/yarn-cache with spaces")
+
+        self.assertEqual(size, "4.0K")
+        server.execute.assert_called_once_with("du -sh -- '/tmp/yarn-cache with spaces'")
+
+    def test_cleanup_does_not_prune_docker_after_job_timeout(self):
+        server = MagicMock(spec=Server)
+        server.remove_temporary_files.side_effect = JobTimeoutException()
+
+        with self.assertRaises(JobTimeoutException):
+            Server.cleanup_unused_files.__wrapped__(server)
+
+        server.remove_unused_docker_artefacts.assert_not_called()
 
 
 class TestServerProxyDetection(unittest.TestCase):
